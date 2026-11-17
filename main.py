@@ -5,8 +5,10 @@ launch-day Twitch viewership follows a diurnal shape that persistence
 ignores -- it dips in the small hours, then climbs as the US wakes and
 peaks in the evening UTC. The shape is estimated from the case's own
 comparables: for each comparable launch, the log ratio of each hour's
-viewers to its hour-1 viewers. The median ratio per hour is the centre;
-the spread is the MAD of those log ratios (normal-quantile spread).
+viewers to its hour-1 viewers. The scale-weighted median ratio per hour
+is the centre (a comparable counts more the closer its hour-1 size is
+to this case's); the spread is the MAD of those log ratios
+(normal-quantile spread).
 
 Regime filter: launches whose hour 1 is still pre-unlock (tiny hour-1
 counts) have explosive ratios that say nothing about a launch that is
@@ -16,6 +18,8 @@ shape -- on big-hour-1 launches that scores 0.305 vs 0.321 for training
 on all comparables and 0.351 for the persistence baseline (mean pinball
 loss on the log scale, leave-one-out over the kit's comparables).
 When hour 1 is small, all comparables train it (honest wide spreads).
+Within the training set, each comparable is weighted by hour-1 size
+similarity (see shape_stats): v2 scores 0.280 in the big-hour-1 regime.
 
 Standard library only, deterministic, no network, no randomness.
 """
@@ -67,18 +71,39 @@ def day_curve(comp):
     return out
 
 
-def shape_stats(curves):
-    """Per-hour (median log-ratio to hour 1, MAD-based sigma)."""
+def weighted_median(vals, weights):
+    """Weighted median: the value where cumulative weight first reaches half."""
+    total = sum(weights)
+    acc = 0.0
+    for v, w in sorted(zip(vals, weights)):
+        acc += w
+        if acc >= total / 2:
+            return v
+    return sorted(vals)[-1]
+
+
+def shape_stats(curves, p1):
+    """Per-hour (scale-weighted median log-ratio to hour 1, MAD-based sigma).
+
+    A comparable counts more the closer its hour-1 size is to this case's:
+    weight exp(-|ln(c1 / p1)| / 1.5). Launches of similar size share the
+    same unlock phase and diurnal shape; distant sizes (still pre-unlock,
+    or far bigger) do not. Leave-one-out over the kit's comparables:
+    0.280 in the big-hour-1 regime vs 0.305 unweighted, 0.351 baseline.
+    """
     per_hour = {h: [] for h in range(2, 25)}
     for curve in curves:
-        p1 = curve[1]
+        p1c = curve[1]
+        w = math.exp(-abs(math.log(p1c / p1)) / 1.5)
         for h in range(2, 25):
             if h in curve:
-                per_hour[h].append(math.log(curve[h] / p1))
+                per_hour[h].append((math.log(curve[h] / p1c), w))
     med, sig = {}, {}
-    for h, vals in per_hour.items():
-        if len(vals) >= MIN_TRAIN:
-            m = statistics.median(vals)
+    for h, pairs in per_hour.items():
+        if len(pairs) >= MIN_TRAIN:
+            vals = [v for v, _ in pairs]
+            ws = [w for _, w in pairs]
+            m = weighted_median(vals, ws)
             mad = statistics.median([abs(v - m) for v in vals])
             med[h] = m
             sig[h] = max(0.05, 1.4826 * mad)
@@ -102,7 +127,7 @@ def forecast_case(case):
         big = [c for c in curves if c[1] >= BIG_HOUR1]
         if len(big) >= 8:
             curves = big
-    med, sig = shape_stats(curves)
+    med, sig = shape_stats(curves, p1)
 
     hours = []
     for row in case["forecast"]:
